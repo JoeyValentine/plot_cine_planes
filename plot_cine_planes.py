@@ -17,8 +17,6 @@ from scipy.interpolate import interpn
 import sympy
 from sympy import Point, Line, Segment, Plane, Point3D
 
-plotly.offline.init_notebook_mode(connected=True)
-
 
 class RotatableAxes:
     def __init__(self, fig: mpl.figure.Figure, axes: mpl.axes.Axes,
