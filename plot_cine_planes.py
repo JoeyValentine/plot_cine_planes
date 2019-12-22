@@ -1,8 +1,12 @@
+import math
+from multiprocessing import Pool
 import pathlib
 import re
 import sys
+import time
 import webbrowser
 
+from numba import njit, prange, cuda
 import cv2 as cv
 import matplotlib as mpl
 
@@ -289,6 +293,94 @@ def get_interpolated_img_stack(file_names_list: list) -> np.ndarray:
     return interpolated_img_stack
 
 
+@njit(parallel=True, cache=True, nogil=True)
+def get_new_pos_numba(trans_mat: np.ndarray, idx_arr: np.ndarray,
+                      n_row: int, n_col: int) -> np.ndarray:
+    ret = np.zeros((n_row, n_col, 4)).astype(np.float32)
+    for i in prange(n_row):
+        for j in prange(n_col):
+            ret[i, j] = trans_mat @ idx_arr[i, j]
+    return ret
+
+
+@cuda.jit
+def get_new_pos_numba_with_cuda(trans_mat: np.ndarray, ret: np.ndarray,
+                                idx_arr: np.ndarray) -> None:
+    x, y = cuda.grid(2)
+    if x < ret.shape[0] and y < ret.shape[1]:
+        for i in range(4):
+            ret[x, y, i] = 0.0
+            for j in range(4):
+                ret[x, y, i] += trans_mat[i, j] * idx_arr[x, y, j]
+
+
+def get_plotly_planes_list_numba(file_names_list: list, n_planes: int = sys.maxsize) -> list:
+    dcm_files = []
+    planes_list = []
+    cine_img_arr = []
+    n_slices = min(len(file_names_list), n_planes)
+
+    for fname in file_names_list:
+        dfile = dicom.read_file(str(fname))
+        dcm_files.append(dfile)
+
+    for dfile in dcm_files:
+        cine_img_arr.append(dfile.pixel_array.astype(np.float32))
+
+    n_row, n_col = cine_img_arr[0].shape
+    cine_img_stack = np.dstack(cine_img_arr)
+
+    idx_arr = np.array([[[float(j), float(i), 0.0, 1.0] for j in range(n_col)] for i in range(n_row)])
+
+    for i in range(n_slices):
+        trans_mat = get_trans_mat3D(dcm_files[i])
+        new_pos = get_new_pos_numba(trans_mat, idx_arr, n_row, n_col)
+        plane = get_plane(new_pos[:, :, 0], new_pos[:, :, 1],
+                          new_pos[:, :, 2], cine_img_stack[:, :, i])
+        planes_list.append(plane)
+
+    return planes_list
+
+
+def get_plotly_planes_list_numba_with_cuda(file_names_list: list, n_planes: int = sys.maxsize) -> list:
+    dcm_files = []
+    planes_list = []
+    cine_img_arr = []
+    n_slices = min(len(file_names_list), n_planes)
+
+    for fname in file_names_list:
+        dfile = dicom.read_file(str(fname))
+        dcm_files.append(dfile)
+
+    for dfile in dcm_files:
+        cine_img_arr.append(dfile.pixel_array.astype(np.float32))
+
+    n_row, n_col = cine_img_arr[0].shape
+    cine_img_stack = np.dstack(cine_img_arr)
+
+    new_pos = np.empty((n_row, n_col, 4))
+    idx_arr = np.array([[[float(j), float(i), 0.0, 1.0] for j in range(n_col)] for i in range(n_row)])
+
+    threads_per_block = (16, 16)
+    blocks_per_grid_x = int(math.ceil(new_pos.shape[0] / threads_per_block[0]))
+    blocks_per_grid_y = int(math.ceil(new_pos.shape[1] / threads_per_block[1]))
+    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
+
+    new_pos_dev = cuda.to_device(new_pos)
+    idx_arr_dev = cuda.to_device(idx_arr)
+
+    for i in range(n_slices):
+        trans_mat = get_trans_mat3D(dcm_files[i])
+        trans_mat_dev = cuda.to_device(trans_mat)
+        get_new_pos_numba_with_cuda[blocks_per_grid, threads_per_block](trans_mat_dev, new_pos_dev, idx_arr_dev)
+        new_pos = new_pos_dev.copy_to_host()
+        plane = get_plane(new_pos[:, :, 0], new_pos[:, :, 1],
+                          new_pos[:, :, 2], cine_img_stack[:, :, i])
+        planes_list.append(plane)
+
+    return planes_list
+
+
 def get_plotly_planes_list(file_names_list: list, n_planes: int = sys.maxsize) -> list:
     dcm_files = []
     planes_list = []
@@ -305,10 +397,14 @@ def get_plotly_planes_list(file_names_list: list, n_planes: int = sys.maxsize) -
     n_row, n_col = cine_img_arr[0].shape
     cine_img_stack = np.dstack(cine_img_arr)
 
+    idx_arr = np.array([[[float(j), float(i), 0.0, 1.0] for j in range(n_col)] for i in range(n_row)])
+
     for i in range(n_slices):
         trans_mat = get_trans_mat3D(dcm_files[i])
-        new_pos = np.array([[trans_mat @ np.array([k, j, 0.0, 1.0])
+        new_pos = np.array([[trans_mat @ idx_arr[k, j]
                              for k in range(n_col)] for j in range(n_row)])
+        # new_pos = np.array([[trans_mat @ np.array([k, j, 0.0, 1.0])
+        #                      for k in range(n_col)] for j in range(n_row)])
         plane = get_plane(new_pos[:, :, 0], new_pos[:, :, 1],
                           new_pos[:, :, 2], cine_img_stack[:, :, i])
         planes_list.append(plane)
@@ -437,18 +533,9 @@ def get_est_la_plane_from_img_stack(points: list, interpolated_img_stack: np.nda
     return la_plane
 
 
-# Suppose that the intersection of two planes is a line
-def smart_crop2D(img: np.ndarray, threshold=0.0) -> np.ndarray:
-    non_empty_columns = np.where(img.max(axis=0) > threshold)[0]
-    non_empty_rows = np.where(img.max(axis=1) > threshold)[0]
-    crop_box = (np.min(non_empty_rows), np.max(non_empty_rows),
-                np.min(non_empty_columns), np.max(non_empty_columns))
-    new_img = np.copy(img[crop_box[0]:crop_box[1] + 1, crop_box[2]:crop_box[3] + 1, ...])
-    return new_img
-
-
 def get_intersection_line3D(lhs_plane: plotly.graph_objs.Surface,
                             rhs_plane: plotly.graph_objs.Surface) -> sympy.Line3D:
+    '''Bottleneck'''
     lhs_points = Point3D(lhs_plane.x[0, 0], lhs_plane.y[0, 0], lhs_plane.z[0, 0]), \
                  Point3D(lhs_plane.x[-1, -1], lhs_plane.y[-1, -1], lhs_plane.z[-1, -1]), \
                  Point3D(lhs_plane.x[0, -1], lhs_plane.y[0, -1], lhs_plane.z[0, -1])
@@ -519,8 +606,64 @@ def is_invertible(x: np.ndarray) -> bool:
     return x.shape[0] == x.shape[1] and np.linalg.matrix_rank(x) == x.shape[0]
 
 
+def main_loop(la_idx: int, la_file_name: str, sa_file_names_list: list,
+              sa_plotly_planes_list: list, interpolated_img_stack: np.ndarray) -> tuple:
+    la_plotly_planes_list = get_plotly_planes_list_numba_with_cuda([la_file_name], 1)
+
+    la_dicom_file = get_dicom_file(la_file_name)
+    la_trans_mat2D = get_trans_mat2D(la_dicom_file)
+    la_trans_constant = get_trans_constant(la_dicom_file)
+    la_plane_range = get_plane_xy_range(la_plotly_planes_list[0].surfacecolor)
+
+    estimated_la_img_list = []
+    intersection_points_list = []
+
+    for i, sa_file_name in enumerate(sa_file_names_list):
+        intersection_line3D = get_intersection_line3D(sa_plotly_planes_list[i],
+                                                      la_plotly_planes_list[0])
+        intersection_points3D = intersection_line3D[0].points
+
+        sa_dicom_file = get_dicom_file(sa_file_name)
+        sa_trans_mat2D = get_trans_mat2D(sa_dicom_file)
+
+        sa_trans_constant = get_trans_constant(sa_dicom_file)
+        sa_plane_range = get_plane_xy_range(sa_plotly_planes_list[i].surfacecolor)
+        sa_intersection_points2D = get_intersection_points2D(intersection_points3D,
+                                                             sa_trans_mat2D, sa_trans_constant)
+        sa_intersection_points2D_with_img = get_intersection_points2D_with_img(sa_intersection_points2D,
+                                                                               sa_plane_range)
+        sa_p1, sa_p2 = sa_intersection_points2D_with_img
+        intersection_points_list.append([sa_p1, sa_p2])
+
+        if i == 0:
+            la_img = la_plotly_planes_list[0].surfacecolor
+            if is_invertible(la_trans_mat2D):
+                la_intersection_points2D = get_intersection_points2D(intersection_points3D,
+                                                                     la_trans_mat2D, la_trans_constant)
+                la_intersection_points2D_with_img = get_intersection_points2D_with_img(la_intersection_points2D,
+                                                                                       la_plane_range)
+                la_p1, la_p2 = la_intersection_points2D_with_img
+                la_img = rotate(la_img, -np.arctan2(la_p2[0] - la_p1[0], la_p2[1] - la_p1[1]) * 180.0 / np.pi)
+
+        estimated_la = get_est_la_plane_from_img_stack(sa_intersection_points2D_with_img,
+                                                       interpolated_img_stack)
+        estimated_la = estimated_la[::-1]
+        estimated_la_img_list.append(estimated_la)
+
+    html_file_path = pathlib.Path(f"{str(la_file_name.name).split('.')[0]}.html")
+    if not html_file_path.exists():
+        plot_planes_with_buttons(sa_plotly_planes_list, la_plotly_planes_list,
+                                 sa_file_names_list, width=1000, height=1000,
+                                 title="Plotting SA planes with a LA plane",
+                                 filename=str(html_file_path))
+        print(f"{str(html_file_path)} created")
+    webbrowser.open_new(str(html_file_path))
+
+    return la_idx, la_img, estimated_la_img_list, intersection_points_list
+
+
 def main() -> None:
-    N_PATIENT, N_PHASE = "DET0000101", 0
+    N_PATIENT, N_PHASE = "DET0001501", 0
     la_file_names_list, sa_file_names_list = get_file_names_lists(N_PATIENT, N_PHASE)
     la_file_names_list = sorted(la_file_names_list, key=sort_by_plane_number)
     sa_file_names_list = get_sorted_SA_plane_names(sa_file_names_list)
@@ -529,7 +672,7 @@ def main() -> None:
     N_SA_PLANES = len(sa_file_names_list)
 
     interpolated_img_stack = get_interpolated_img_stack(sa_file_names_list)
-    sa_plotly_planes_list = get_plotly_planes_list(sa_file_names_list)
+    sa_plotly_planes_list = get_plotly_planes_list_numba_with_cuda(sa_file_names_list)
 
     la_img_list = []
     sa_img_list = [sa_plotly_planes_list[i].surfacecolor for i in range(N_SA_PLANES)]
@@ -541,57 +684,16 @@ def main() -> None:
     sa_titles_list = [f"{N_PATIENT}_original_sa{sa_num}_ph{str(N_PHASE)}" for sa_num in sa_num_list]
     est_la_titles_list = [f"estimated_la{str(i + 1)}_ph{str(N_PHASE)}" for i in range(N_LA_PLANES)]
 
-    for i, la_file_name in enumerate(la_file_names_list):
-        la_plotly_planes_list = get_plotly_planes_list([la_file_name], 1)
+    with Pool(processes=N_LA_PLANES) as pool:
+        multiple_results = [pool.apply_async(main_loop, (i, la_file_name, sa_file_names_list,
+                                                         sa_plotly_planes_list, interpolated_img_stack))
+                            for i, la_file_name in enumerate(la_file_names_list)]
+        results = sorted([ret.get() for ret in multiple_results], key=lambda x: x[0])
 
-        la_dicom_file = get_dicom_file(la_file_name)
-        la_trans_mat2D = get_trans_mat2D(la_dicom_file)
-        la_trans_constant = get_trans_constant(la_dicom_file)
-        la_plane_range = get_plane_xy_range(la_plotly_planes_list[0].surfacecolor)
-
-        estimated_la_img_list.append([])
-        intersection_points_list.append([])
-
-        for j, sa_file_name in enumerate(sa_file_names_list):
-            intersection_line3D = get_intersection_line3D(sa_plotly_planes_list[j],
-                                                          la_plotly_planes_list[0])
-            intersection_points3D = intersection_line3D[0].points
-
-            sa_dicom_file = get_dicom_file(sa_file_name)
-            sa_trans_mat2D = get_trans_mat2D(sa_dicom_file)
-            sa_trans_constant = get_trans_constant(sa_dicom_file)
-            sa_plane_range = get_plane_xy_range(sa_plotly_planes_list[j].surfacecolor)
-            sa_intersection_points2D = get_intersection_points2D(intersection_points3D,
-                                                                 sa_trans_mat2D, sa_trans_constant)
-            sa_intersection_points2D_with_img = get_intersection_points2D_with_img(sa_intersection_points2D,
-                                                                                   sa_plane_range)
-            sa_p1, sa_p2 = sa_intersection_points2D_with_img
-            intersection_points_list[i].append([sa_p1, sa_p2])
-
-            if j == 0:
-                la_img = la_plotly_planes_list[0].surfacecolor
-                if is_invertible(la_trans_mat2D):
-                    la_intersection_points2D = get_intersection_points2D(intersection_points3D,
-                                                                         la_trans_mat2D, la_trans_constant)
-                    la_intersection_points2D_with_img = get_intersection_points2D_with_img(la_intersection_points2D,
-                                                                                           la_plane_range)
-                    la_p1, la_p2 = la_intersection_points2D_with_img
-                    la_img = rotate(la_img, -np.arctan2(la_p2[0] - la_p1[0], la_p2[1] - la_p1[1]) * 180.0 / np.pi)
-                la_img_list.append(la_img)
-
-            estimated_la = get_est_la_plane_from_img_stack(sa_intersection_points2D_with_img,
-                                                           interpolated_img_stack)
-            estimated_la = estimated_la[::-1]
-            estimated_la_img_list[i].append(estimated_la)
-
-        html_file_path = pathlib.Path(f"{str(la_file_name.name).split('.')[0]}.html")
-        if not html_file_path.exists():
-            plot_planes_with_buttons(sa_plotly_planes_list, la_plotly_planes_list,
-                                     sa_file_names_list, width=1000, height=1000,
-                                     title="Plotting SA planes with a LA plane",
-                                     filename=str(html_file_path))
-            print(f"{str(html_file_path)} created")
-        webbrowser.open_new(str(html_file_path))
+    for i in range(N_LA_PLANES):
+        la_img_list.append(results[i][1])
+        estimated_la_img_list.append(results[i][2])
+        intersection_points_list.append(results[i][3])
 
     file_slider_fig = FileSliderFig(la_img_list, sa_img_list, estimated_la_img_list, intersection_points_list,
                                     la_titles_list, sa_titles_list, est_la_titles_list,
@@ -602,4 +704,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
