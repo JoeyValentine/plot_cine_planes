@@ -362,9 +362,9 @@ def get_plotly_planes_list_numba_with_cuda(file_names_list: list, n_planes: int 
     idx_arr = np.array([[[float(j), float(i), 0.0, 1.0] for j in range(n_col)] for i in range(n_row)])
 
     threads_per_block = (16, 16)
-    blocks_per_grid_x = int(math.ceil(new_pos.shape[0] / threads_per_block[0]))
-    blocks_per_grid_y = int(math.ceil(new_pos.shape[1] / threads_per_block[1]))
-    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
+    blocks_per_grid_xaxis = math.ceil(new_pos.shape[0] / threads_per_block[0])
+    blocks_per_grid_yaxis = math.ceil(new_pos.shape[1] / threads_per_block[1])
+    blocks_per_grid = (blocks_per_grid_xaxis, blocks_per_grid_yaxis)
 
     new_pos_dev = cuda.to_device(new_pos)
     idx_arr_dev = cuda.to_device(idx_arr)
