@@ -2,7 +2,7 @@
 
 
 <p align="center">
-    <a href="https://www.python.org/downloads/release/python-350/">
+    <a href="https://www.python.org/downloads/release/python-374/">
         <img src="https://img.shields.io/badge/python-v3.7.4-blue.svg?logo=python&logoColor=white">
     </a>
     <img src="https://img.shields.io/badge/windows-10-blue.svg?logo=windows&logoColor=white">
