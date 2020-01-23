@@ -42,8 +42,8 @@ In the image on the right, we can see the discontinuity between the images insid
 ## Showcase
 
 <p align="center">
-  <img src = "https://i.imgur.com/XeklSPS.gif" alt="plotly result">
-  <img src = "https://i.imgur.com/R5h0XKN.gif" alt="matplotlib result">
+  <img src = "https://i.imgur.com/iPgk5m7.gif" alt="plotly result">
+  <img src = "https://i.imgur.com/UVGNbeu.gif" alt="matplotlib result">
 </p>
 
 
