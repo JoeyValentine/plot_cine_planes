@@ -35,7 +35,7 @@ When taking a heart MRI, deformation occurs due to breathing or movement. In ord
   <img src = "https://i.imgur.com/nnxUgEP.png" alt="plotly discontinuous image" width=300 height=300>
 </p>
 
-In the left image, you can check the continuity between the images(short axis and long axis slices).
+In the left image, you can check the continuity between the images(short axis and long axis slices).  
 In the image on the right, we can see the discontinuity between the images inside the red circle.
 
 
