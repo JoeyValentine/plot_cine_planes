@@ -59,5 +59,5 @@ If you wish to contribute to our project, please please do not hesitate to [cont
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
 
