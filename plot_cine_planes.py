@@ -695,7 +695,7 @@ def main() -> None:
     sa_titles_list = [f"{N_PATIENT}_original_sa{sa_num}_ph{str(N_PHASE)}" for sa_num in sa_num_list]
     est_la_titles_list = [f"estimated_la{str(i + 1)}_ph{str(N_PHASE)}" for i in range(N_LA_PLANES)]
 
-    with Pool(processes=3) as pool:
+    with Pool(processes=N_LA_PLANES) as pool:
         multiple_results = [pool.apply_async(main_loop, (i, la_file_name, sa_file_names_list,
                                                          sa_plotly_planes_list, interpolated_img_stack))
                             for i, la_file_name in enumerate(la_file_names_list)]
