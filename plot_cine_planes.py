@@ -3,20 +3,17 @@ from multiprocessing import Pool
 import pathlib
 import re
 import sys
-import time
 import webbrowser
 
 from numba import njit, prange, cuda
 import cv2 as cv
 import matplotlib as mpl
-
 mpl.use('Qt5Agg')
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 import numpy as np
 import plotly
 import pydicom as dicom
-from skimage.transform import rotate
 from scipy.interpolate import interpn
 import sympy
 from sympy import Point, Line, Segment, Plane, Point3D
@@ -79,7 +76,7 @@ class RotatableAxes:
             self.axes.figure.canvas.flush_events()
 
     def update_img(self, new_angle: float) -> None:
-        rotated_img = rotate(self.original_img_list[self.flip_idx][self.rot_idx], new_angle)
+        rotated_img = rotate_img(self.original_img_list[self.flip_idx][self.rot_idx], new_angle)
         self.axes_img.set_data(rotated_img)
         self.axes.figure.canvas.update()
         self.axes.figure.canvas.flush_events()
@@ -362,9 +359,9 @@ def get_plotly_planes_list_numba_with_cuda(file_names_list: list, n_planes: int 
     idx_arr = np.array([[[float(j), float(i), 0.0, 1.0] for j in range(n_col)] for i in range(n_row)])
 
     threads_per_block = (16, 16)
-    blocks_per_grid_xaxis = math.ceil(new_pos.shape[0] / threads_per_block[0])
-    blocks_per_grid_yaxis = math.ceil(new_pos.shape[1] / threads_per_block[1])
-    blocks_per_grid = (blocks_per_grid_xaxis, blocks_per_grid_yaxis)
+    blocks_per_grid_x = int(math.ceil(new_pos.shape[0] / threads_per_block[0]))
+    blocks_per_grid_y = int(math.ceil(new_pos.shape[1] / threads_per_block[1]))
+    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
 
     new_pos_dev = cuda.to_device(new_pos)
     idx_arr_dev = cuda.to_device(idx_arr)
@@ -606,9 +603,22 @@ def is_invertible(x: np.ndarray) -> bool:
     return x.shape[0] == x.shape[1] and np.linalg.matrix_rank(x) == x.shape[0]
 
 
+def rotate_img(image, angle, center=None, scale=1.0):
+    (h, w) = image.shape[:2]
+
+    if center is None:
+        center = (w / 2, h / 2)
+
+    # Perform the rotation
+    M = cv.getRotationMatrix2D(center, angle, scale)
+    rotated = cv.warpAffine(image, M, (w, h))
+
+    return rotated
+
+
 def main_loop(la_idx: int, la_file_name: str, sa_file_names_list: list,
               sa_plotly_planes_list: list, interpolated_img_stack: np.ndarray) -> tuple:
-    la_plotly_planes_list = get_plotly_planes_list_numba_with_cuda([la_file_name], 1)
+    la_plotly_planes_list = get_plotly_planes_list_numba([la_file_name], 1)
 
     la_dicom_file = get_dicom_file(la_file_name)
     la_trans_mat2D = get_trans_mat2D(la_dicom_file)
@@ -643,7 +653,7 @@ def main_loop(la_idx: int, la_file_name: str, sa_file_names_list: list,
                 la_intersection_points2D_with_img = get_intersection_points2D_with_img(la_intersection_points2D,
                                                                                        la_plane_range)
                 la_p1, la_p2 = la_intersection_points2D_with_img
-                la_img = rotate(la_img, -np.arctan2(la_p2[0] - la_p1[0], la_p2[1] - la_p1[1]) * 180.0 / np.pi)
+                la_img = rotate_img(la_img, -np.arctan2(la_p2[0] - la_p1[0], la_p2[1] - la_p1[1]) * 180.0 / np.pi)
 
         estimated_la = get_est_la_plane_from_img_stack(sa_intersection_points2D_with_img,
                                                        interpolated_img_stack)
@@ -663,6 +673,7 @@ def main_loop(la_idx: int, la_file_name: str, sa_file_names_list: list,
 
 
 def main() -> None:
+
     N_PATIENT, N_PHASE = "DET0001501", 0
     la_file_names_list, sa_file_names_list = get_file_names_lists(N_PATIENT, N_PHASE)
     la_file_names_list = sorted(la_file_names_list, key=sort_by_plane_number)
@@ -672,7 +683,7 @@ def main() -> None:
     N_SA_PLANES = len(sa_file_names_list)
 
     interpolated_img_stack = get_interpolated_img_stack(sa_file_names_list)
-    sa_plotly_planes_list = get_plotly_planes_list_numba_with_cuda(sa_file_names_list)
+    sa_plotly_planes_list = get_plotly_planes_list_numba(sa_file_names_list)
 
     la_img_list = []
     sa_img_list = [sa_plotly_planes_list[i].surfacecolor for i in range(N_SA_PLANES)]
@@ -684,7 +695,7 @@ def main() -> None:
     sa_titles_list = [f"{N_PATIENT}_original_sa{sa_num}_ph{str(N_PHASE)}" for sa_num in sa_num_list]
     est_la_titles_list = [f"estimated_la{str(i + 1)}_ph{str(N_PHASE)}" for i in range(N_LA_PLANES)]
 
-    with Pool(processes=N_LA_PLANES) as pool:
+    with Pool(processes=3) as pool:
         multiple_results = [pool.apply_async(main_loop, (i, la_file_name, sa_file_names_list,
                                                          sa_plotly_planes_list, interpolated_img_stack))
                             for i, la_file_name in enumerate(la_file_names_list)]
